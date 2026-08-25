@@ -10,7 +10,7 @@ An interactive, menu-driven Bash script designed to automate the deployment, net
 * **Dynamic SSL & Reverse Proxy:** Full support for Caddy reverse proxy integrated with multiple SSL options (Self-signed, Custom CA signing, Imported certs, or Caddy's internal CA).
 * **Modular Service Selection:** Choose specific services to install or deploy the entire stack at once.
 * **Env Backup System:** Automatically backs up previous `stack.env` configurations with timestamping before writing new runs.
-* **Portainer-Only Deployment Mode:** Option to generate configurations only and hand off stack management to a lightweight Portainer UI instance.
+* **Portainer-Only Deployment Mode:** Option to generate configurations only and hand off stack management to YOU to use lightweight Portainer UI instance.
 
 ---
 
@@ -31,9 +31,9 @@ An interactive, menu-driven Bash script designed to automate the deployment, net
 
 ## Prerequisites
 
-* **Operating System:** Ubuntu or Debian-based Linux distribution.
+* **Operating System:** Ubuntu or Debian-based Linux distribution (others would also work but you need to install pre-requisites yourself).
 * **Privileges:** Root or `sudo` access required.
-* **Directory Structure:** Make sure your compose files are stored in a relative `./compose-files/` directory before running the setup script.
+* **Directory Structure:** Make sure the compose files are stored in a relative `./compose-files/` directory before running the setup script (which they are by default).
 
 ---
 
