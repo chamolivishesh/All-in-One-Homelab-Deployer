@@ -1,0 +1,19 @@
+name: vaultwarden
+
+services:
+  vaultwarden:
+    image: vaultwarden/server:latest
+    container_name: vaultwarden
+    restart: unless-stopped
+    environment:
+      DOMAIN: ${VAULTWARDEN_DOMAIN:-https://localhost}
+    volumes:
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/vaultwarden:/data/
+#    ports:
+#      - ${VAULTWARDEN_PORT_HTTP:-127.0.0.1:8000}:80
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    name: ${NETWORK_NAME:-vaultwarden-bridge}

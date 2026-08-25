@@ -1,0 +1,28 @@
+name: caddy-stack
+
+services:
+  caddy:
+    image: caddy:latest
+    container_name: caddy-proxy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile:/etc/caddy/Caddyfile
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/data:/data
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/config:/config
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/certs:/etc/caddy/certs
+    networks:
+      - app-net
+    env_file:
+      - stack.env
+
+networks:
+  app-net:
+    name: ${NETWORK_NAME:?required}
+    external: true
+
+volumes:
+  caddy_data:
+  caddy_config:

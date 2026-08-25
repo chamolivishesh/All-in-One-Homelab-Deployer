@@ -1,0 +1,23 @@
+name: portainer
+
+services:
+  portainer:
+    image: portainer/portainer-ce:lts
+    container_name: portainer
+    restart: always
+#    ports:
+#      - "${PORTAINER_PORT_EDGE_AGENTS:-}:8000"
+#      - "${PORTAINER_PORT_HTTP:-}:9000"
+#      - "${PORTAINER_PORT_HTTPS:-}:9443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/portainer:/data
+    networks:
+      - app-net
+
+volumes:
+  portainer_data:
+
+networks:
+  app-net:
+    name: ${NETWORK_NAME:-portainer-bridge}

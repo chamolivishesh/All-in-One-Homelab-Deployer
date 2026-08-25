@@ -1,0 +1,19 @@
+name: homepage
+
+services:
+  homepage:
+    image: ghcr.io/gethomepage/homepage:latest
+    container_name: homepage
+    #ports:
+      #- "${HOMEPAGE_PORT_HTTP:-}:3000"
+    volumes:
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/homepage:/app/config # Make sure your local config directory exists
+      - /var/run/docker.sock:/var/run/docker.sock:ro # (optional) For docker integrations
+    environment:
+      HOMEPAGE_ALLOWED_HOSTS: ${HOMEPAGE_ALLOWED_HOSTS_CSV:?required} # required, may need port. See gethomepage.dev/installation/#homepage_allowed_hosts
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    name: ${NETWORK_NAME:-homepage-bridge}
