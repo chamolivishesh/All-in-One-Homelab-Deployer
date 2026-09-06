@@ -1,0 +1,27 @@
+name: syncthing
+
+services:
+  syncthing:
+    image: lscr.io/linuxserver/syncthing:latest
+    container_name: syncthing
+    hostname: syncthing #optional
+    environment:
+      - PUID=0
+      - PGID=0
+      - TZ=${TZ:-Europe/London}
+    volumes:
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/syncthing:/config
+      #- /path/to/data1:/data1
+      #- /path/to/data2:/data2
+    ports:
+#      - ${SYNCTHING_PORT_HTTP:-}:8384
+      - 22000:22000/tcp    # p2p file transfer
+      - 22000:22000/udp    # p2p file transfer
+      - 21027:21027/udp    # discovery
+    restart: unless-stopped
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    name: ${NETWORK_NAME:-syncthing-bridge}

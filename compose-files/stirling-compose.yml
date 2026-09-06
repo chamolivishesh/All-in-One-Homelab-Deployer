@@ -1,0 +1,25 @@
+name: stirlingpdf
+services:
+  stirling-pdf:
+    container_name: stirlingpdf
+    image: docker.stirlingpdf.com/stirlingtools/stirling-pdf
+#    ports:
+#      - ${STIRLING_PORT_HTTP:-8080}:8080
+    restart: unless-stopped
+    volumes:
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/stirling-pdf/tessdata:/usr/share/tessdata  # OCR language files
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/stirling-pdf/configs:/configs        # Settings & database
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/stirling-pdf/logs:/logs              # Application logs
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/stirling-pdf/pipeline:/pipeline      # Automation configs
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/stirling-pdf/storage:/storage      # Storage files location
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/stirling-pdf/customFiles:/customFiles:rw      # Custom branding files
+    environment:
+      - SECURITY_ENABLELOGIN=true
+      - STORAGE_ENABLED=true
+      - STORAGE_PROVIDER=local
+      - STORAGE_LOCAL_BASEPATH=/storage
+    networks:
+      - app-net
+networks:
+  app-net:
+    name: ${NETWORK_NAME:-stirlingpdf-bridge}
