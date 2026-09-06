@@ -1,4 +1,4 @@
-name: caddy-stack
+name: caddy
 
 services:
   caddy:
@@ -12,7 +12,7 @@ services:
       - ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile:/etc/caddy/Caddyfile
       - ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/data:/data
       - ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/config:/config
-      - ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/certs:/etc/caddy/certs
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/ssl_certs:/etc/caddy/certs
     networks:
       - app-net
     env_file:

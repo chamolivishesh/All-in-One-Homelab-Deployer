@@ -5,7 +5,8 @@ set -e
 DIR_CA="./ssl_ca"
 DIR_SSL="./ssl_cert"
 DIR_PFX="./ssl_cert_pfx"
-mkdir -p "$DIR_CA" "$DIR_SSL" "$DIR_PFX"
+mkdir -p "$DIR_CA" "$DIR_SSL"
+
 
 # Helper: Collect details for CA
 get_ca_details() {
@@ -55,6 +56,9 @@ get_cert_details() {
 
 # Helper: Convert .crt and .key to PKCS #12 (.pfx)
 convert_to_pfx() {
+
+    mkdir -p "$DIR_CA" "$DIR_SSL" "$DIR_PFX"
+
     local cert_path="$1"
     local key_path="$2"
     local output_name="$3"
@@ -67,7 +71,7 @@ convert_to_pfx() {
     local pfx_path="$DIR_PFX/${output_name}.pfx"
     echo ""
     echo "[+] Converting to PKCS #12 format..."
-
+    
     # Openssl command to create pfx; prompts for export password securely
     openssl pkcs12 -export -out "$pfx_path" -inkey "$key_path" -in "$cert_path"
 
@@ -188,17 +192,17 @@ while true; do
             create_cert_with_ca "$DIR_CA/localCA.key" "$DIR_CA/localCA.crt"
             ;;
         4)
-            read -p "Enter path to pre-made CA Certificate [$DIR_CA/localCA.crt]: " USER_CA_CRT
+            read -r -e -p "Enter path to pre-made CA Certificate [$DIR_CA/localCA.crt]: " USER_CA_CRT
             USER_CA_CRT=${USER_CA_CRT:-"$DIR_CA/localCA.crt"}
 
-            read -p "Enter path to pre-made CA Private Key [$DIR_CA/localCA.key]: " USER_CA_KEY
+            read -e -e -p "Enter path to pre-made CA Private Key [$DIR_CA/localCA.key]: " USER_CA_KEY
             USER_CA_KEY=${USER_CA_KEY:-"$DIR_CA/localCA.key"}
 
             create_cert_with_ca "$USER_CA_KEY" "$USER_CA_CRT"
             ;;
         5)
-            read -p "Enter path to the certificate (.crt) file: " INPUT_CRT
-            read -p "Enter path to the private key (.key) file: " INPUT_KEY
+            read -r -e -p "Enter path to the certificate (.crt) file: " INPUT_CRT
+            read -r -e -p "Enter path to the private key (.key) file: " INPUT_KEY
             read -p "Enter output name for the .pfx file (without extension) [server]: " PFX_NAME
             PFX_NAME=${PFX_NAME:-"server"}
 

@@ -1,0 +1,20 @@
+name: wallos
+
+services:
+  wallos:
+    container_name: wallos
+    image: bellamy/wallos:latest
+    #ports:
+    #  - "8282:80/tcp"
+    environment:
+      TZ: ${TZ:-Europe/London}
+    volumes:
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/wallos/db:/var/www/html/db
+      - ${SERVER_DATA_FOLDER:-/root/labdata}/wallos/logos:/var/www/html/images/uploads/logos
+    restart: unless-stopped
+    networks:
+      - app-net
+
+networks:
+  app-net:
+    name: ${NETWORK_NAME:-wallos-bridge}

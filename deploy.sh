@@ -1,5 +1,7 @@
 #!/bin/bash
 
+set -e
+
 # Colors for output
 GREEN='\033[0;32m'
 CYAN='\033[0;36m'
@@ -15,14 +17,23 @@ cd "$SCRIPT_DIR"
 OUTFILES_LOCATION="$SCRIPT_DIR/outfiles"
 ENV_FILE="$OUTFILES_LOCATION/stack.env"
 
-rm -f $OUTFILES_LOCATION/*.yml
+if [ "$EUID" -ne 0 ]; then
+    echo ""
+    echo -e "${RED}[Error] This script must be run with sudo privileges.${NC}"
+    echo -e "Please run: \033[1msudo ./$(basename "$0")\033[0m"
+    exit 1
+fi
+
+if compgen -G "$OUTFILES_LOCATION/*.yml" >/dev/null; then
+    rm -f "$OUTFILES_LOCATION"/*.yml
+fi
 # Ensure the outfiles directory exists
 mkdir -p "$OUTFILES_LOCATION"
 
 # If the env file already exists, back it up with a unique timestamp
 if [ -f "$ENV_FILE" ]; then
     TIMESTAMP=$(date +"%d-%m-%Y_%H-%M-%S")
-    mkdir -p $OUTFILES_LOCATION/backup_env
+    mkdir -p "$OUTFILES_LOCATION/backup_env"
     BACKUP_FILE="$OUTFILES_LOCATION/backup_env/stack_$TIMESTAMP.env"
     cp "$ENV_FILE" "$BACKUP_FILE"
     echo -e "${CYAN}--> Note: Existing stack.env backed up to: outfiles/backup_env/stack_$TIMESTAMP.env${NC}"
@@ -35,28 +46,35 @@ AUTHENTIK_COMPOSE="authentik-compose.yml"
 HOMEPAGE_COMPOSE="homepage-compose.yml"
 IMMICH_COMPOSE="immich-compose.yml"
 JELLYFIN_COMPOSE="jellyfin-compose.yml"
-PIHOLE_COMPOSE="pihole-compose.yml"
+ADGUARD_COMPOSE="adguard-compose.yml"
 PORTAINER_COMPOSE="portainer-compose.yml"
 SYNCTHING_COMPOSE="syncthing-compose.yml"
 VAULTWARDEN_COMPOSE="vaultwarden-compose.yml"
 CADDY_COMPOSE="caddy-compose.yml"
+STIRLING_COMPOSE="stirling-compose.yml"
+HOMEASSISTANT_COMPOSE="homeassistant-compose.yml"
+WALLOS_COMPOSE="wallos-compose.yml"
+
+# =========================================================== ADD CODE ABOVE FOR MORE INTEGRATION
 
 echo
 echo -e "${CYAN}=== Homelab Setup Menu ===${NC}"
 
-# 0. Check if script is run with sudo/root privileges
-if [ "$EUID" -ne 0 ]; then
-    echo ""
-    echo -e "${RED}[Error] This script must be run with sudo privileges.${NC}"
-    echo -e "Please run: \033[1msudo ./$(basename "$0")\033[0m"
-    exit 1
+# 1. Automatic Docker, Docker Compose, OpenSSL, and yq Check/Install
+echo -e "\n${YELLOW}[Step 1] Checking Docker, Docker Compose, OpenSSL, and yq...${NC}"
+
+docker_ready=false
+if command -v docker >/dev/null 2>&1 && docker compose version >/dev/null 2>&1; then
+    docker_ready=true
 fi
 
-# 1. Automatic Docker & Docker Compose Check/Install
-echo -e "\n${YELLOW}[Step 1] Checking Docker & Docker Compose...${NC}"
+tools_ready=false
+if command -v openssl >/dev/null 2>&1 && command -v yq >/dev/null 2>&1; then
+    tools_ready=true
+fi
 
-if ! command -v docker &> /dev/null || ! docker compose version &> /dev/null; then
-    echo -e "${YELLOW}Docker or Docker Compose not found. Starting automatic installation...${NC}"
+if [[ "$docker_ready" == "false" || "$tools_ready" == "false" ]]; then
+    echo -e "${YELLOW}One or more required tools are missing. Starting automatic installation...${NC}"
 
     # Detect OS
     if [ -f /etc/os-release ]; then
@@ -72,7 +90,7 @@ if ! command -v docker &> /dev/null || ! docker compose version &> /dev/null; th
 
         # Add Docker's official GPG key and repo
         apt-get update
-        apt-get install -y ca-certificates curl yq
+        apt-get install -y ca-certificates curl openssl yq
         install -m 0755 -d /etc/apt/keyrings
         curl -fsSL "https://download.docker.com/linux/$OS/gpg" -o /etc/apt/keyrings/docker.asc
         chmod a+r /etc/apt/keyrings/docker.asc
@@ -96,7 +114,13 @@ Signed-By: /etc/apt/keyrings/docker.asc" > /etc/apt/sources.list.d/docker.source
         exit 1
     fi
 else
-    echo -e "${GREEN}Docker and Docker Compose are already installed!${NC}"
+    echo -e "${GREEN}Docker, Docker Compose, OpenSSL, and yq are already installed!${NC}"
+fi
+
+if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>&1 || \
+   ! command -v openssl >/dev/null 2>&1 || ! command -v yq >/dev/null 2>&1; then
+    echo -e "${RED}[Error] Docker Compose v2, OpenSSL, and yq are required.${NC}"
+    exit 1
 fi
 
 echo
@@ -109,6 +133,7 @@ echo -e "${CYAN}--> Note: Vaultwarden does not work at all without an SSL connec
 read -p "Do you want to configure Caddy reverse proxy for SSL? (y/N): " run_caddy
 
 execute_caddy=false
+generate_caddy=false
 
 if [[ "$run_caddy" =~ ^[Yy]$ ]]; then
     read -p "Enter Docker Network Name (default: labnetwork): " net_name
@@ -118,12 +143,14 @@ if [[ "$run_caddy" =~ ^[Yy]$ ]]; then
         echo -e "${YELLOW}Network '$net_name' already exists. Skipping creation.${NC}"
         echo -e "NETWORK_NAME=$net_name\n" >> "$ENV_FILE"
         execute_caddy=true
+        generate_caddy=true
     else
         echo -e "${CYAN}Creating Docker network '$net_name'...${NC}"
         if docker network create "$net_name"; then
             echo -e "${GREEN}Network '$net_name' created successfully!${NC}"
             echo -e "NETWORK_NAME=$net_name\n" >> "$ENV_FILE"
             execute_caddy=true
+            generate_caddy=true
         else
             echo -e "${RED}[Error] Failed to create network.${NC}"
             exit 1
@@ -137,9 +164,11 @@ if [[ "$run_caddy" =~ ^[Yy]$ ]]; then
     echo "  4) Let Caddy Reverse Proxy Create a Certificate using its Internal CA"
     read -p "Select SSL option (1-4): " ssl_choice
 
-    certdir=$OUTFILES_LOCATION/certs
-    mkdir -p $certdir
-    rm -f $certdir/*
+    certdir="$OUTFILES_LOCATION/certs"
+    mkdir -p "$certdir"
+    if compgen -G "$certdir/*" >/dev/null; then
+        rm -f "$certdir"/*
+    fi
 
     caddy_certificate_option=0
     case $ssl_choice in
@@ -149,76 +178,49 @@ if [[ "$run_caddy" =~ ^[Yy]$ ]]; then
             read -p "Enter common name or domain (e.g., localhost or example.local): " common_name
             common_name=${common_name:?Error: Common Name/Domain cannot be blank}
 
-            # Generate a self-signed root CA / certificate with SAN support in one command
-            openssl req -x509 -newkey rsa:2048 -nodes \
-                -keyout "$certdir/selfsigned.key" \
-                -out "$certdir/selfsigned.crt" \
-                -days 365 \
-                -subj "/CN=$common_name" \
-                -addext "subjectAltName=DNS:$common_name,IP:127.0.0.1"
-
             certkey="$certdir/selfsigned.key"
             certfile="$certdir/selfsigned.crt"
-
-            if [ -f "$certdir/selfsigned.crt" ] && [ -f "$certdir/selfsigned.key" ]; then
-                echo -e "${GREEN}Successfully generated self-signed certificate and private key under $certdir${NC}"
-                caddy_certificate_option=1
-            else
-                echo -e "${RED}[Error] Failed to generate certificates.${NC}"
-                exit 1
-            fi
-
-            sleep 0.1
+            ca_cert=            # for adguard CA installation
+            ca_key=
+            caddy_certificate_option=1
             ;;
         2)
             echo -e "${CYAN}--> Generating a Certificate with an existing CA...${NC}"
 
-            read -p "Enter path to your existing CA private key (.key): " ca_key
-            read -p "Enter path to your existing CA certificate (.crt / .pem): " ca_cert
+            read -r -e -p "Enter path to your existing CA private key (.key): " ca_key
+            read -r -e -p "Enter path to your existing CA certificate (.crt / .pem): " ca_cert
             read -p "Enter common name or domain (e.g., localhost or example.local): " common_name
 
             common_name=${common_name:?Error: Common Name/Domain cannot be blank}
 
             if [ -f "$ca_key" ] && [ -f "$ca_cert" ]; then
-
-                echo -e "${CYAN}Generating private key and signing request...${NC}"
-                openssl genpkey -algorithm RSA -out "$certdir/server.key"
-
-                openssl req -new -key "$certdir/server.key" \
-                    -out "$certdir/server.csr" \
-                    -subj "/CN=$common_name" \
-                    -addext "subjectAltName=DNS:$common_name,IP:127.0.0.1"
-
-                echo -e "${CYAN}Signing the certificate with your existing CA...${NC}"
-                openssl x509 -req -days 365 -in "$certdir/server.csr" \
-                    -CA "$ca_cert" -CAkey "$ca_key" -CAcreateserial \
-                    -out "$certdir/server.crt" \
-                    -copy_extensions copyall
-
-                # Cleanup intermediate CSR file
-                rm -f "$certdir/server.csr"
-
-            fi
-
-            if [ -f "$certdir/server.crt" ] && [ -f "$certdir/server.key" ]; then
-                echo -e "${GREEN}Certificate successfully created and signed by the CA under $certdir${NC}"
+                certkey="$certdir/server.key"
+                certfile="$certdir/server.crt"
                 caddy_certificate_option=2
             else
                 echo -e "${RED}[Error] Provided CA key or certificate files could not be found.${NC}"
                 exit 1
             fi
-
-            sleep 0.1
             ;;
         3)
             echo -e "${CYAN}--> Importing existing SSL certificate...${NC}"
-            read -p "Enter path to your certificate file (.crt / .pem): " cert_path
-            read -p "Enter path to your private key file (.key): " key_path
+            read -r -e -p "Enter path to your certificate file (.crt / .pem): " cert_path
+            read -r -e -p "Enter path to your private key file (.key): " key_path
+            read -r -e -p "Enter path to your CA (.crt, RECOMMENDED, NOT NECESSARY): " ca_cert
 
             if [ -f "$cert_path" ] && [ -f "$key_path" ]; then
                 echo -e "${GREEN}Certificates located. Ready to integrate into Caddy setup.${NC}"
-                cp "$cert_path" $certdir/imported.crt
-                cp "$key_path" $certdir/imported.key
+
+                certkey="$certdir/imported.key"
+                certfile="$certdir/imported.crt"
+
+                #Below seems to be mistake
+                #ca_cert=         # for adguard CA install (CA not provided)
+                #ca_key=          # for adguard CA install (CA not provided)
+
+                cp "$cert_path" "$certfile"
+                cp "$key_path" "$certkey"
+
                 caddy_certificate_option=3
                 sleep 0.1
             else
@@ -227,7 +229,7 @@ if [[ "$run_caddy" =~ ^[Yy]$ ]]; then
             fi
             ;;
         4)
-            echo -e "${CYAN}--> Caddy will create a Self-Signed Certificate using its Internal CA...${NC}"
+            echo -e "${CYAN}--> Caddy will use a Self-Signed Certificate using its Internal CA...${NC}"
             caddy_certificate_option=4
             sleep 0.1
             ;;
@@ -244,15 +246,20 @@ echo "Toggle your choices. Enter space-separated numbers (e.g., 0 for all, or 1 
 echo ""
 echo "  0) Install All"
 echo ""
-echo "  1) Portainer     (Management UI)"
-echo "  2) Homepage      (Dashboard)"
-echo "  3) Authentik     (Identity Provider / SSO)"
-echo "  4) Vaultwarden   (Password Manager)"
-echo "  5) Pi-hole       (DNS Ad-blocker)"
-echo "  6) Immich        (Photo Backup & ML)"
-echo "  7) Jellyfin      (Media Server)"
-echo "  8) Syncthing     (File Syncing)"
+echo "  1)  Portainer     (Management UI)"
+echo "  2)  Homepage      (Dashboard)"
+echo "  3)  Authentik     (Identity Provider / SSO)"
+echo "  4)  Vaultwarden   (Password Manager)"
+echo "  5)  AdGuard Home  (DNS / Ad-blocker)"
+echo "  6)  Immich        (Photo Backup & ML)"
+echo "  7)  Jellyfin      (Media Server)"
+echo "  8)  Syncthing     (File Syncing)"
+echo "  9)  Stirling PDF  (PDF Edit / Store / Manage)"
+echo "  10) HomeAssistant (Home Automation)"
+echo "  11) Wallos        (Subscription Tracker)"
 echo ""
+
+# =========================================================== ADD CODE ABOVE FOR MORE INTEGRATION
 
 read -p "Enter your choices (e.g., 0 or 1 2 5): " -a choices
 
@@ -262,11 +269,16 @@ declare -A service_names=(
     [2]="Homepage"
     [3]="Authentik"
     [4]="Vaultwarden"
-    [5]="Pi-hole"
+    [5]="AdGuard"
     [6]="Immich"
     [7]="Jellyfin"
     [8]="Syncthing"
+    [9]="StirlingPDF"
+    [10]="HomeAssistant"
+    [11]="Wallos"
 )
+
+# =========================================================== ADD CODE ABOVE FOR MORE INTEGRATION
 
 # Build a list of selected service names
 selected_names=()
@@ -281,8 +293,10 @@ for choice in "${choices[@]}"; do
 done
 
 if [ "$install_all" = true ]; then
-    # Automatically select all keys 1 through 8 in order
-    for i in {1..8}; do
+    # Automatically select all keys 1 through 9 in order
+    for i in {1..11}; do
+# =========================================================== CHANGE VALUE IN FOR LOOP
+
         selected_names+=("${service_names[$i]}")
     done
 else
@@ -308,7 +322,11 @@ get_var() {
     local var_name=$1
     local default_val=$2
     local prompt_msg=$3
-    read -p "$prompt_msg (default: $default_val): " input
+    if [[ "$var_name" == "SERVER_DATA_FOLDER" || "$var_name" == "JELLYFIN_MEDIA_FOLDER" ]]; then
+        read -r -e -p "$prompt_msg (default: $default_val): " input
+    else
+        read -p "$prompt_msg (default: $default_val): " input
+    fi
     echo "${input:-$default_val}"
 }
 
@@ -322,9 +340,11 @@ echo "SERVER_DATA_FOLDER=$SERVER_DATA_FOLDER" >> "$ENV_FILE"
 echo -e "${CYAN}All your container files (configs, DBs) will be stored in $SERVER_DATA_FOLDER ${NC}"
 
 
-if [[ " ${selected_names[*]} " =~ "Immich" ]] || [[ " ${selected_names[*]} " =~ "Pi-hole" ]] || [[ " ${selected_names[*]} " =~ "Syncthing" ]]; then
+if [[ " ${selected_names[*]} " =~ "Immich" ]] || [[ " ${selected_names[*]} " =~ "Syncthing" ]] || [[ " ${selected_names[*]} " =~ "HomeAssistant" ]] || [[ " ${selected_names[*]} " =~ "Wallos" ]]; then
     echo "TZ=$(get_var "TZ" "Europe/London" "Enter Timezone (See \"https://en.wikipedia.org/wiki/List_of_tz_database_time_zones#List\")")" >> "$ENV_FILE"
 fi
+
+# =========================================================== ADD CODE ABOVE FOR TIMEZONE
 
 echo ""
 
@@ -341,7 +361,7 @@ if [[ " ${selected_names[*]} " =~ "Portainer" ]]; then
     read -p "Do you want to use Portainer to manually deploy and manage your containers? (y/N): " portainer_choice
     if [[ "$portainer_choice" =~ ^[Yy]$ ]]; then
         use_portainer_compose=true
-        echo -e "${CYAN}--> Note: Portainer mode enabled. This installer will generate the required environment configuration (stack.env) files only, without automatically deploying the containers via CLI. But of course, Portainer will be installed with open ports while Caddy Reverse Proxy will NOT!${NC}\n"
+        echo -e "${CYAN}--> Note: Portainer mode enabled. This installer will generate the selected Compose files, stack.env, and Caddy artifacts without automatically deploying the service stacks via CLI. Portainer will be installed with open ports; Caddy will be prepared but not started.${NC}\n"
         execute_caddy=false
     fi
 
@@ -389,8 +409,8 @@ if [[ " ${selected_names[*]} " =~ "Authentik" ]]; then
 
     echo -e "\n--- Authentik Configuration ---"
 
-    echo "AUTHENTIK_PG_DB=authentik	# pre-configured" >> "$ENV_FILE"
-    echo "AUTHENTIK_PG_USER=authentik	# pre-configured" >> "$ENV_FILE"
+    echo "AUTHENTIK_PG_DB=authentik     # pre-configured" >> "$ENV_FILE"
+    echo "AUTHENTIK_PG_USER=authentik   # pre-configured" >> "$ENV_FILE"
 
     read -p "Enter custom DB password (leave blank to auto-generate: RECOMMENDED): " custom_pass
     echo "PG_PASS=${custom_pass:-$(openssl rand -base64 60 | tr -dc 'a-zA-Z0-9' | tr -d '\n' | head -c 36)}" >> "$ENV_FILE"
@@ -423,26 +443,19 @@ if [[ " ${selected_names[*]} " =~ "Vaultwarden" ]]; then
     echo "VAULTWARDEN_DOMAIN=$(get_var "VAULTWARDEN_DOMAIN" "https://localhost" "Enter Domain(s) (comma-separated)")" >> "$ENV_FILE"
 fi
 
-# --- Pi-hole ---
-echo -e "\n# Pi-Hole Configuration..." >> "$ENV_FILE"
+# --- AdGuard Home ---
+echo -e "\n# AdGuard Home Configuration..." >> "$ENV_FILE"
 
-if [[ " ${selected_names[*]} " =~ "Pi-hole" ]]; then
 
-    cp "$SCRIPT_DIR/compose-files/$PIHOLE_COMPOSE" "$OUTFILES_LOCATION/"
+if [[ " ${selected_names[*]} " =~ "AdGuard" ]]; then
 
-    echo -e "\n--- Pi-hole Configuration ---"
-    read -p "Enter Pi-hole Web Admin Password (leave blank to auto-generate: RECOMMENDED): " pihole_pass
+    cp "$SCRIPT_DIR/compose-files/$ADGUARD_COMPOSE" "$OUTFILES_LOCATION/"
 
-    # Generate a secure random password if left blank
-    echo "PIHOLE_WEBSERVER_API_PASSWORD=${pihole_pass:-$(openssl rand -base64 60 | tr -dc 'a-zA-Z0-9' | tr -d '\n' | head -c 36)}" >> "$ENV_FILE"
-    echo -e "${GREEN}Password Generated... Saved to outfiles/stack.env${NC}"
-
-    read -p "Do you want to use Pi-Hole as a DHCP server? (y/N): " pihole_as_dhcp
-    read -p "Do you want to use Pi-Hole as an NTP server? (y/N): " pihole_as_ntp
+    echo -e "\n--- AdGuard Home Configuration ---"
 
     if [[ "$execute_caddy" == "false" ]]; then
-        echo "PIHOLE_PORT_HTTP=$(get_var "PIHOLE_PORT_HTTP" "8040" "Enter HTTP Port")" >> "$ENV_FILE"
-        echo "PIHOLE_PORT_HTTPS=$(get_var "PIHOLE_PORT_HTTPS" "8041" "Enter HTTPS Port")" >> "$ENV_FILE"
+        echo "ADGUARD_PORT_HTTP=$(get_var "ADGUARD_PORT_HTTP" "8040" "Enter HTTP Port")" >> "$ENV_FILE"
+        echo "ADGUARD_PORT_HTTPS=$(get_var "ADGUARD_PORT_HTTPS" "8041" "Enter HTTPS Port")" >> "$ENV_FILE"
     fi
 
 fi
@@ -459,7 +472,7 @@ if [[ " ${selected_names[*]} " =~ "Immich" ]]; then
     echo -e "\n--- Immich Configuration ---"
 
     echo "IMMICH_DB_DATABASE_NAME=immich  # pre-configured" >> "$ENV_FILE"
-    echo "IMMICH_DB_USERNAME=postgres	# pre-configured" >> "$ENV_FILE"
+    echo "IMMICH_DB_USERNAME=postgres   # pre-configured" >> "$ENV_FILE"
 
     echo "IMMICH_HW_TRANSCODING_SERVICE=$(get_var "IMMICH_HW_TRANSCODING_SERVICE" "cpu" "Enter Hardware Transcoding device [nvenc, quicksync, rkmpp, vaapi, vaapi-wsl]")" >> "$ENV_FILE"
 
@@ -498,7 +511,11 @@ if [[ " ${selected_names[*]} " =~ "Jellyfin" ]]; then
     cp "$SCRIPT_DIR/compose-files/$JELLYFIN_COMPOSE" "$OUTFILES_LOCATION/"
 
     echo -e "\n--- Jellyfin Configuration ---"
-    echo "WORK IN PROGRESS..."
+    echo "JELLYFIN_MEDIA_FOLDER=$(get_var "JELLYFIN_MEDIA_FOLDER" "/mnt/jellyfinmedia" "Enter Jellyfin media folder path")" >> "$ENV_FILE"
+    if [[ "$execute_caddy" == "false" ]]; then
+        echo "JELLYFIN_PORT_HTTP=$(get_var "JELLYFIN_PORT_HTTP" "8096" "Enter HTTP Port")" >> "$ENV_FILE"
+        echo "JELLYFIN_PORT_HTTPS=$(get_var "JELLYFIN_PORT_HTTPS" "8192" "Enter HTTPS Port")" >> "$ENV_FILE"
+    fi
 fi
 
 # --- Syncthing ---
@@ -513,6 +530,42 @@ if [[ " ${selected_names[*]} " =~ "Syncthing" ]]; then
         echo "SYNCTHING_PORT_HTTP=$(get_var "SYNCTHING_PORT_HTTP" "8070" "Enter HTTP Port")" >> "$ENV_FILE"
     fi
 fi
+
+# --- Stirling PDF ---
+echo -e "\n# Stirling PDF Configuration..." >> "$ENV_FILE"
+
+if [[ " ${selected_names[*]} " =~ "StirlingPDF" ]]; then
+
+    cp "$SCRIPT_DIR/compose-files/$STIRLING_COMPOSE" "$OUTFILES_LOCATION/"
+
+    if [[ "$execute_caddy" == "false" ]]; then
+        echo -e "\n--- StirlingPDF Configuration ---"
+        echo "STIRLING_PORT_HTTP=$(get_var "STIRLING_PORT_HTTP" "8080" "Enter HTTP Port")" >> "$ENV_FILE"
+    fi
+fi
+
+# --- HomeAssistant ---
+echo -e "\n# HomeAssistnat Configuration..." >> "$ENV_FILE"
+if [[ " ${selected_names[*]} " =~ "HomeAssistant" ]]; then
+
+    cp "$SCRIPT_DIR/compose-files/$HOMEASSISTANT_COMPOSE" "$OUTFILES_LOCATION/"
+    echo -e "\n--- HomeAssistant Configuration ---"
+    echo -e "${CYAN}Home Assistant uses host networking and listens on port 8123; no host port mapping is configured here.${NC}"
+fi
+
+# --- Wallos ---
+echo -e "\n# Wallos Configuration..." >> "$ENV_FILE"
+if [[ " ${selected_names[*]} " =~ "Wallos" ]]; then
+
+    cp "$SCRIPT_DIR/compose-files/$WALLOS_COMPOSE" "$OUTFILES_LOCATION/"
+
+    echo -e "\n--- Wallos Configuration ---"
+    if [[ "$execute_caddy" == "false" ]]; then
+        echo "WALLOS_PORT_HTTP=$(get_var "WALLOS_PORT_HTTP" "8282" "Enter HTTP Port")" >> "$ENV_FILE"
+    fi
+fi
+
+# =========================================================== ADD CODE ABOVE FOR MORE INTEGRATION
 
 echo ""
 echo -e "${GREEN}Environment file has been created: $ENV_FILE${NC}"
@@ -549,19 +602,9 @@ if [[ "$execute_caddy" == "false" ]]; then
         yq -iy '.services.vaultwarden.ports += ["${VAULTWARDEN_PORT_HTTP:-127.0.0.1:8000}:80"]' "$OUTFILES_LOCATION/$VAULTWARDEN_COMPOSE"
     fi
 
-    # Pi-hole
-    if [ -f "$OUTFILES_LOCATION/$PIHOLE_COMPOSE" ]; then
-        yq -iy '.services.pihole.ports += ["${PIHOLE_PORT_HTTP:-}:80/tcp", "${PIHOLE_PORT_HTTPS:-}:443/tcp"]' "$OUTFILES_LOCATION/$PIHOLE_COMPOSE"
-
-        # If using Pi-Hole as DHCP server, open 67 UDP
-        if [[ "$pihole_as_dhcp" =~ ^[yY]$ ]]; then
-            yq -iy '.services.pihole.ports += ["67:67/udp"]' "$OUTFILES_LOCATION/$PIHOLE_COMPOSE"
-        fi
-
-        # If using Pi-Hole as NTP server, open 123 UDP
-        if [[ "$pihole_as_ntp" =~ ^[yY]$ ]]; then
-            yq -iy '.services.pihole.ports += ["123:123/udp"]' "$OUTFILES_LOCATION/$PIHOLE_COMPOSE"
-        fi
+    # AdGuard
+    if [ -f "$OUTFILES_LOCATION/$ADGUARD_COMPOSE" ]; then
+        yq -iy '.services.adguardhome.ports += ["${ADGUARD_PORT_HTTP:-}:80/tcp", "${ADGUARD_PORT_HTTPS:-}:443", "3000:3000"]' "$OUTFILES_LOCATION/$ADGUARD_COMPOSE"
     fi
 
     # Immich
@@ -570,14 +613,32 @@ if [[ "$execute_caddy" == "false" ]]; then
     fi
 
     # Jellyfin
-    echo -e "${RED}JELLYFIN  WIP\n${NC}"
+    if [ -f "$OUTFILES_LOCATION/$JELLYFIN_COMPOSE" ]; then
+        yq -iy '.services.jellyfin.ports += ["${JELLYFIN_PORT_HTTP:-}:8096", "${JELLYFIN_PORT_HTTPS:-}:8920"]' "$OUTFILES_LOCATION/$JELLYFIN_COMPOSE"
+    fi
 
     # Syncthing
     if [ -f "$OUTFILES_LOCATION/$SYNCTHING_COMPOSE" ]; then
         yq -iy '.services.syncthing.ports += ["${SYNCTHING_PORT_HTTP:-}:8384"]' "$OUTFILES_LOCATION/$SYNCTHING_COMPOSE"
     fi
 
-elif [[ "$execute_caddy" == "true" ]]; then
+    # Stirling PDF
+    if [ -f "$OUTFILES_LOCATION/$STIRLING_COMPOSE" ]; then
+        yq -iy '.services."stirling-pdf".ports += ["${STIRLING_PORT_HTTP:-}:8080"]' "$OUTFILES_LOCATION/$STIRLING_COMPOSE"
+    fi
+
+    # Wallos
+    if [ -f "$OUTFILES_LOCATION/$WALLOS_COMPOSE" ]; then
+        yq -iy '.services.wallos.ports += ["${WALLOS_PORT_HTTP:-}:80"]' "$OUTFILES_LOCATION/$WALLOS_COMPOSE"
+    fi
+
+    # HomeAssistant - Not needed as it uses Host network instead of bridge
+
+# =========================================================== ADD CODE ABOVE FOR MORE INTEGRATION
+
+fi
+
+if [[ "$generate_caddy" == "true" ]]; then
 
     # Add `external: true` if network was created
     yq -iy '.networks."app-net".external = true' $OUTFILES_LOCATION/*compose.yml
@@ -593,7 +654,7 @@ if [ -f "$OUTFILES_LOCATION/$IMMICH_COMPOSE" ]; then
 fi
 
 # Requesting information for Caddy Reverse Proxy
-if [[ "$execute_caddy" == "true" ]]; then
+if [[ "$generate_caddy" == "true" ]]; then
     echo -e "${YELLOW}Enter Domains for the following:\n${NC}"
 
     if [ -f "$OUTFILES_LOCATION/$HOMEPAGE_COMPOSE" ]; then
@@ -611,9 +672,9 @@ if [[ "$execute_caddy" == "true" ]]; then
         caddy_portainer=${caddy_portainer:-portainer.server.home}
     fi
 
-    if [ -f "$OUTFILES_LOCATION/$PIHOLE_COMPOSE" ]; then
-        read -r -e -p " Pi-hole (default: 'dns.server.home'): " caddy_pihole
-        caddy_pihole=${caddy_pihole:-dns.server.home}
+    if [ -f "$OUTFILES_LOCATION/$ADGUARD_COMPOSE" ]; then
+        read -r -e -p " AdGuard (default: 'dns.server.home'): " caddy_adguard
+        caddy_adguard=${caddy_adguard:-dns.server.home}
     fi
 
     if [ -f "$OUTFILES_LOCATION/$VAULTWARDEN_COMPOSE" ]; then
@@ -635,27 +696,86 @@ if [[ "$execute_caddy" == "true" ]]; then
         read -r -e -p " Syncthing (default: 'sync.server.home'): " caddy_syncthing
         caddy_syncthing=${caddy_syncthing:-sync.server.home}
     fi
+
+    if [ -f "$OUTFILES_LOCATION/$STIRLING_COMPOSE" ]; then
+        read -r -e -p " Stirling PDF (default: 'pdf.server.home'): " caddy_stirling
+        caddy_stirling=${caddy_stirling:-pdf.server.home}
+
+        # TODO: copy the below variables under the Stirling PDF section in the stack.env file. 
+        echo "SYSTEM_FRONTENDURL=https://$caddy_stirling" >> "$ENV_FILE"
+        echo "SYSTEM_CORSALLOWEDORIGINS=https://$caddy_stirling" >> "$ENV_FILE"
+    fi
+
+    if [ -f "$OUTFILES_LOCATION/$WALLOS_COMPOSE" ]; then
+        read -r -e -p " Wallos (default: 'wallos.server.home'): " caddy_wallos
+        caddy_wallos=${caddy_wallos:-wallos.server.home}
+    fi
+
+    if [ -f "$OUTFILES_LOCATION/$HOMEASSISTANT_COMPOSE" ]; then
+        read -r -e -p " HomeAssistant (default: 'home.server.home'): " caddy_homeassistant
+        caddy_homeassistant=${caddy_homeassistant:-home.server.home}
+    fi
+fi
+
+# =========================================================== ADD CODE ABOVE FOR MORE INTEGRATION
+
+# Generate certificates after all Caddy domains are known so their SANs match the routes.
+if [[ "$generate_caddy" == "true" && "$caddy_certificate_option" =~ ^[12]$ ]]; then
+    san_entries="DNS:$common_name,DNS:*.$common_name"
+
+    for caddy_domain in "$caddy_homepage" "$caddy_authentik" "$caddy_portainer" "$caddy_adguard" \
+        "$caddy_vaultwarden" "$caddy_immich" "$caddy_jellyfin" "$caddy_syncthing" \
+        "$caddy_stirling" "$caddy_homeassistant" "$caddy_wallos"; do
+        if [ -n "${caddy_domain:-}" ] && [[ ",$san_entries," != *",DNS:$caddy_domain,"* ]]; then
+            san_entries="$san_entries,DNS:$caddy_domain"
+        fi
+    done
+
+    if [[ "$caddy_certificate_option" == "1" ]]; then
+        openssl req -x509 -newkey rsa:2048 -nodes \
+            -keyout "$certkey" \
+            -out "$certfile" \
+            -days 365 \
+            -subj "/CN=$common_name" \
+            -addext "subjectAltName=$san_entries"
+        echo -e "${GREEN}Successfully generated self-signed certificate and private key under $certdir${NC}"
+    else
+        openssl genpkey -algorithm RSA -out "$certkey"
+        openssl req -new -key "$certkey" \
+            -out "$certdir/server.csr" \
+            -subj "/CN=$common_name" \
+            -addext "subjectAltName=$san_entries"
+        openssl x509 -req -days 365 -in "$certdir/server.csr" \
+            -CA "$ca_cert" -CAkey "$ca_key" -CAcreateserial \
+            -out "$certfile" \
+            -copy_extensions copyall
+        rm -f "$certdir/server.csr"
+        echo -e "${GREEN}Certificate successfully created and signed by the CA under $certdir${NC}"
+    fi
 fi
 
 echo ""
 
 # Create caddy files before deploying any container (so that if user wants to build using portainer, they have Caddy files ready
-if [[ "$execute_caddy" == "true" ]]; then
+if [[ "$generate_caddy" == "true" ]]; then
     # Preparing Caddy Compose file to outfiles folder
-    cp $SCRIPT_DIR/compose-files/$CADDY_COMPOSE $OUTFILES_LOCATION
 
-    CADDY_DEST_DIR="${SERVER_DATA_FOLDER:-/root/labdata}/caddy/certs"
-    mkdir -p "$CADDY_DEST_DIR"
+    cp "$SCRIPT_DIR/compose-files/$CADDY_COMPOSE" "$OUTFILES_LOCATION/"
+    # If adguard is being installed, open ports 3000 and 8443
+    if [ -f "$OUTFILES_LOCATION/$ADGUARD_COMPOSE" ]; then
+        yq -iy '.services.caddy.ports += ["3000:3000", "8443:8443"]' "$OUTFILES_LOCATION/$CADDY_COMPOSE"
+    fi
 
-    echo -e "{\n    # Optional global options here\n}\n" > ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile
-
-
+    CADDY_CERT_DEST_DIR="${SERVER_DATA_FOLDER:-/root/labdata}/ssl_certs"
+    CADDY_CONFIG_DIR="${SERVER_DATA_FOLDER:-/root/labdata}/caddy"
+    mkdir -p "$CADDY_CERT_DEST_DIR" "$CADDY_CONFIG_DIR/data" "$CADDY_CONFIG_DIR/config"
+    printf '{\n    # Optional global options here\n}\n\n' > "$CADDY_CONFIG_DIR/Caddyfile"
 
     # Initialize file path variables
     caddy_key_file=""
     caddy_cert_file=""
 
-    # Determine key and certificate filenames based on the selected option
+    # Determine key and certificate filenames based on the selected option (MAYBE REDUNDANT AS certkey and certfile variable exist)
     case $caddy_certificate_option in
         1)
             caddy_key_file="selfsigned.key"
@@ -670,50 +790,69 @@ if [[ "$execute_caddy" == "true" ]]; then
             caddy_cert_file="imported.crt"
             ;;
     esac
-
     if [ "$caddy_certificate_option" -ge 1 ] && [ "$caddy_certificate_option" -le 3 ]; then
         # Ensure CERT_DIR points to wherever your temporary or generated files are stored
-        cp "$certdir"/* "$CADDY_DEST_DIR/"
+        cp "$certdir"/* "$CADDY_CERT_DEST_DIR/"
+        printf '(tls_settings) {\n    tls /etc/caddy/certs/%s /etc/caddy/certs/%s\n}\n\n' "$caddy_cert_file" "$caddy_key_file" > "$CADDY_CONFIG_DIR/Caddyfile"
 
-        echo -e "(tls_settings) {\n    tls /etc/caddy/certs/$caddy_cert_file /etc/caddy/certs/$caddy_key_file\n}\n" >> "${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile"
+        if [ "$caddy_certificate_option" -ge 2 ] && [ "$caddy_certificate_option" -le 3 ]; then
+            if [ -n "${ca_cert:-}" ] && [ -f "$ca_cert" ]; then
+                mkdir -p "${SERVER_DATA_FOLDER:-/root/labdata}/adguard-home/ssl_ca"
+                cp "$ca_cert" "${SERVER_DATA_FOLDER:-/root/labdata}/adguard-home/ssl_ca/"
+            fi
+        fi
 
     elif [ "$caddy_certificate_option" -eq 4 ]; then
-        echo -e "(internal_tls) {\n    tls internal\n}\n" >> "${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile"
+        printf '(tls_settings) {\n    tls internal\n}\n\n' >> "$CADDY_CONFIG_DIR/Caddyfile"
     fi
 
     if [[ " ${selected_names[*]} " =~ "Homepage" ]]; then
-        echo -e "$caddy_homepage {\n    import tls_settings\n    reverse_proxy homepage:3000\n}\n" >> ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile
+        echo -e "$caddy_homepage {\n    import tls_settings\n    reverse_proxy homepage:3000\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
     fi
 
     if [[ " ${selected_names[*]} " =~ "Authentik" ]]; then
-        echo -e "$caddy_authentik {\n    import tls_settings\n    reverse_proxy authentik-stack-server-1:9000\n}\n" >> ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile
+        echo -e "$caddy_authentik {\n    import tls_settings\n    reverse_proxy authentik-stack-server-1:9000\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
     fi
 
     if [[ " ${selected_names[*]} " =~ "Portainer" ]]; then
-        echo -e "$caddy_portainer {\n    import tls_settings\n    reverse_proxy portainer:9000\n}\n" >> ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile
+        echo -e "$caddy_portainer {\n    import tls_settings\n    reverse_proxy portainer:9000\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
     fi
 
-    if [[ " ${selected_names[*]} " =~ "Pi-hole" ]]; then
-        echo -e "$caddy_pihole {\n    import tls_settings\n    reverse_proxy pihole:80\n}\n" >> ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile
+    if [[ " ${selected_names[*]} " =~ "AdGuard" ]]; then
+        echo -e "$caddy_adguard:443 {\n    import tls_settings\n    reverse_proxy https://adguardhome:443 {\n        transport http {\n            tls_insecure_skip_verify\n        }\n    }\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
+
+        echo -e "$caddy_adguard:8443 {\n    import tls_settings\n    reverse_proxy http://adguardhome:80\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
+
+        echo -e "$caddy_adguard:3000 {\n    import tls_settings\n    reverse_proxy http://adguardhome:3000\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
     fi
 
     if [[ " ${selected_names[*]} " =~ "Vaultwarden" ]]; then
-        echo -e "$caddy_vaultwarden {\n    import tls_settings\n    reverse_proxy vaultwarden:80\n}\n" >> ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile
+        echo -e "$caddy_vaultwarden {\n    import tls_settings\n    reverse_proxy vaultwarden:80\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
     fi
 
     if [[ " ${selected_names[*]} " =~ "Immich" ]]; then
-        echo -e "$caddy_immich {\n    import tls_settings\n    reverse_proxy immich-server:2283\n}\n" >> ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile
+        echo -e "$caddy_immich {\n    import tls_settings\n    reverse_proxy immich-server:2283\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
     fi
 
     if [[ " ${selected_names[*]} " =~ "Jellyfin" ]]; then
-        echo -e "${RED}JELLYFIN WIP${NC}"
+        echo -e "$caddy_jellyfin {\n    import tls_settings\n    reverse_proxy jellyfin:8096\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
     fi
 
     if [[ " ${selected_names[*]} " =~ "Syncthing" ]]; then
-        echo -e "$caddy_syncthing {\n    import tls_settings\n    reverse_proxy syncthing:8384\n}\n" >> ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile
+        echo -e "$caddy_syncthing {\n    import tls_settings\n    reverse_proxy syncthing:8384\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
     fi
 
-    cp ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile $OUTFILES_LOCATION/Caddyfile
+    if [[ " ${selected_names[*]} " =~ "StirlingPDF" ]]; then
+        echo -e "$caddy_stirling {\n    import tls_settings\n    reverse_proxy stirlingpdf:8080\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
+    fi
+
+    if [[ " ${selected_names[*]} " =~ "Wallos" ]]; then
+        echo -e "$caddy_wallos {\n    import tls_settings\n    reverse_proxy wallos:80\n}\n" >> "$CADDY_CONFIG_DIR/Caddyfile"
+    fi
+
+# =========================================================== ADD CODE ABOVE FOR MORE INTEGRATION
+    # Copy Caddyfile for future reference to $OUTFILES_LOCATION
+    cp "$CADDY_CONFIG_DIR/Caddyfile" "$OUTFILES_LOCATION/Caddyfile"
     echo -e "${GREEN}Caddyfile created...${NC}"
 fi
 
@@ -721,7 +860,7 @@ fi
 # If user wants to user portainer manually, composing only Portainer.
 if [[ "$use_portainer_compose" == "true" ]]; then
     echo -e "${CYAN}You can use the outfiles/stack.env to create containers through portainer.${NC}"
-    echo -e "${CYAN}Additionally, you can find 'Caddyfile' and SSL Certificates in '$SERVER_DATA_FOLDER/caddy' directory.${NC}"
+    echo -e "${CYAN}The generated Caddy Compose file and Caddyfile are in outfiles/. Certificates are in '$SERVER_DATA_FOLDER/ssl_certs'.${NC}"
     echo
     read -e -r -p "${YELLOW}Start building Portainer?${NC}" build_portainer
 
@@ -736,32 +875,92 @@ else
 
     # Check if user said yes
     if [[ "$all_at_once" == "y" || "$all_at_once" == "Y" ]]; then
-       ONE_BY_ONE=""
-        echo -e "\n${CYAN}This will be done by the time you finish your poop, so don't even bother getting comfortable.${NC}"
+        WAIT_FOR_RUNNING=false
+        echo -e "\n${CYAN}This will be done by the time you finish your poop, so don't even bother getting comfortable. (Only if your PC has the strength)${NC}"
     else
-        ONE_BY_ONE="--wait"
-        echo -e "\n${CYAN}This will take time. If we don't complete it in five minutes, assume I've unplugged everything and started staring at a wall.${NC}"
+        WAIT_FOR_RUNNING=true
+        echo -e "\n${CYAN}This will start each stack after its containers are running. Healthchecks may remain starting or unhealthy during boot.${NC}"
     fi
 
     # --- Final Question 2 ---
     read -r -p "$(echo -e "${YELLOW}Ready to start composing docker containers? [y/N] ${NC}")" start_compose
 
-    # Check if user said 'y' or 'Y'
+    # Check if user said No
     if [[ ! "$start_compose" =~ ^[yY]$ ]]; then
         echo
         echo -e "${CYAN}Exiting... File 'stack.env' saved in outfiles folder."
         echo -e "You can start the containers manually on either Portainer (if installed) or using the following command:${NC}"
-        echo -e "\t${GREEN}docker compose --env-file $OUTFILES_LOCATION/stack.env -f $OUTFILES_LOCATION/<compose_file> up -d $ONE_BY_ONE"
+        echo -e "\t${GREEN}docker compose --env-file \"$ENV_FILE\" -f \"$OUTFILES_LOCATION/<compose_file>\" up -d"
         exit 0
     fi
 fi
 
-# 5. Deploying Docker containers using a clean loop
-echo -e "\n${YELLOW}[Step 5] Deploying Container Stacks...${NC}"
+# Start a Compose file and, in sequential mode, wait only for container state.
+# Docker health status is intentionally ignored because first-run initialization can report unhealthy temporarily.
+compose_up() {
+    local compose_file="$1"
+    local container_ids
+    local container_id
+    local container_state
+    local all_running
+    local elapsed=0
+    local timeout=300
+
+    docker compose --env-file "$ENV_FILE" -f "$compose_file" up -d
+
+    if [[ "${WAIT_FOR_RUNNING:-false}" != "true" ]]; then
+        return 0
+    fi
+
+    while (( elapsed < timeout )); do
+        container_ids=$(docker compose --env-file "$ENV_FILE" -f "$compose_file" ps -q)
+        if [[ -n "$container_ids" ]]; then
+            all_running=true
+            for container_id in $container_ids; do
+                container_state=$(docker inspect --format '{{.State.Status}}' "$container_id")
+                case "$container_state" in
+                    running)
+                        ;;
+                    exited|dead)
+                        echo -e "${RED}[Error] Container $container_id entered state '$container_state'.${NC}" >&2
+                        return 1
+                        ;;
+                    *)
+                        all_running=false
+                        ;;
+                esac
+            done
+
+            if [[ "$all_running" == "true" ]]; then
+                return 0
+            fi
+        fi
+
+        sleep 2
+        elapsed=$((elapsed + 2))
+    done
+
+    echo -e "${RED}[Error] Timed out waiting for containers in $compose_file to reach running state.${NC}" >&2
+    return 1
+}
+
+# 5. Deploying Caddy Reverse Proxy with SSL
+if [[ "$execute_caddy" == "true" ]]; then
+
+    echo -e "\n${YELLOW}[Step 5] Deploying Caddy Reverse Proxy with SSL...${NC}"
+    compose_up "$OUTFILES_LOCATION/$CADDY_COMPOSE"
+
+else
+    echo -e "\n${YELLOW} Skipping Step 5: Deploying Caddy Reverse Proxy with SSL...${NC}"
+
+fi
+
+# 6. Deploying Docker containers using a clean loop
+echo -e "\n${YELLOW}[Step 6] Deploying Container Stacks...${NC}"
 
 # If Portainer mode, compose only portainer
 if [[ "$use_portainer_compose" =~ ^[yY]$ ]]; then
-    docker compose --env-file $OUTFILES_LOCATION/stack.env -f "$OUTFILES_LOCATION/$PORTAINER_COMPOSE" up -d
+    compose_up "$OUTFILES_LOCATION/$PORTAINER_COMPOSE"
     echo ""
     echo -e "\n${GREEN}Done... Hopefully :)${NC}"
     echo -e "${GREEN}All relevant files created in $OUTFILES_LOCATION.${NC}"
@@ -770,36 +969,65 @@ if [[ "$use_portainer_compose" =~ ^[yY]$ ]]; then
 fi
 
 # a. Start immich-compose.yml first
-if [ -f "$OUTFILES_LOCATION/immich-compose.yml" ]; then
-    docker compose --env-file $OUTFILES_LOCATION/stack.env -f "$OUTFILES_LOCATION/immich-compose.yml" up -d $ONE_BY_ONE
+if [ -f "$OUTFILES_LOCATION/$IMMICH_COMPOSE" ]; then
+    compose_up "$OUTFILES_LOCATION/$IMMICH_COMPOSE"
 fi
 
-# b. Process all other compose files sequentially (case-insensitive, excluding immich and caddy)
-for i in $(ls $OUTFILES_LOCATION | grep -i compose | grep -vi immich | grep -vi caddy)
-do
-    docker compose --env-file $OUTFILES_LOCATION/stack.env -f "$OUTFILES_LOCATION/$i" up -d $ONE_BY_ONE
+# b. Start adguard-compose.yml second
+if [ -f "$OUTFILES_LOCATION/$ADGUARD_COMPOSE" ]; then
+    compose_up "$OUTFILES_LOCATION/$ADGUARD_COMPOSE"
+
+    if [[ "$execute_caddy" == "true" ]]; then
+
+        echo -e "${CYAN}AdGuard needs to reboot for verifying your CA...${NC}"
+        if docker exec adguardhome update-ca-certificates && docker restart adguardhome; then
+            echo -e "${GREEN}AdGuard CA certificates updated and the container restarted.${NC}"
+        else
+            echo -e "${RED}[Error] AdGuard CA refresh or restart failed.${NC}" >&2
+            exit 1
+        fi
+
+        echo -e "${GREEN}Ports are directed through Reverse proxy-> 3000:3000 (Initial config only) | 8443:80 | 443:443 (Required if you enable DNS-over-HTTPS)."
+        echo -e "To enable DNS-over-HTTPs, add certificate path \"${SERVER_DATA_FOLDER:-/root/labdata}/ssl_certs/$caddy_cert_file\" and key path \"${SERVER_DATA_FOLDER:-/root/labdata}/ssl_certs/$caddy_key_file\" in the webUI settings to enable /dns-query.${NC}"
+
+    else
+        echo -e "${GREEN}Access port 3000 for initial config, then $ADGUARD_PORT_HTTP for configuration. If you enable HTTPS, access it on port $ADGUARD_PORT_HTTPS. ${NC}\n"
+    fi
+
+fi
+
+# b. Process all other compose files sequentially, excluding immich, adguard and caddy.
+for compose_path in "$OUTFILES_LOCATION"/*compose.yml; do
+    [ -e "$compose_path" ] || continue
+    compose_name=${compose_path##*/}
+    case "$compose_name" in
+        *[Ii][Mm][Mm][Ii][Cc][Hh]*|*[Cc][Aa][Dd][Dd][Yy]*|*[Aa][Dd][Gg][Uu][Aa][Rr][Dd]*)
+            continue
+            ;;
+    esac
+    compose_up "$compose_path"
 done
 
-# 6. Deploying Caddy Reverse Proxy with SSL
-if [[ "$execute_caddy" == "true" ]]; then
-
-    echo -e "\n${YELLOW}[Step 6] Deploying Caddy Reverse Proxy with SSL...${NC}"
-    docker compose --env-file $OUTFILES_LOCATION/stack.env -f "$OUTFILES_LOCATION/$CADDY_COMPOSE" up -d $ONE_BY_ONE
-
+if [[ " ${selected_names[*]} " =~ "HomeAssistant" && "$execute_caddy" == "true" && "$caddy_certificate_option" -ge 1 && "$caddy_certificate_option" -le 3 ]]; then
+    echo -e "${CYAN}It is recommended to configure SSL/TLS natively in Home Assistant rather than proxying its host-networked web UI through Caddy.${NC}"
+    echo -e "${CYAN}Open http://${caddy_homeassistant}:8123 and follow these steps:${NC}"
+    echo -e "${CYAN}1. Navigate to Settings > System > Network.${NC}"
+    echo -e "${CYAN}2. Under Home Assistant URL, enter https://${caddy_homeassistant}:8123 and save.${NC}"
+    echo -e "${CYAN}3. Under HTTP settings, open SSL/TLS.${NC}"
+    echo -e "${CYAN}4. Set 'SSL Certificate path' to /ssl_certs/$caddy_cert_file.${NC}"
+    echo -e "${CYAN}5. Set 'SSL Key path' to /ssl_certs/$caddy_key_file, then save and restart.${NC}"
+    echo -e "${CYAN}6. After restart, open https://${caddy_homeassistant}:8123.${NC}\n"
 fi
 
 echo -e "\n${GREEN}Done... Hopefully :)${NC}"
-echo -e "\n${CYAN}--> Note: Authentik and Immich compose are notorious while composing. If any of them cause problems, use one of the following commands to delete them and compose again (BEFORE RUNNING THIS SCRIPT, OTHERWISE RELEVANT INFORMATION WILL BE DELETED!${NC}"
+echo -e "\n${CYAN}--> If Authentik or Immich has startup problems, inspect status and logs before changing containers:${NC}"
 echo ""
-echo -e "\t${GREEN}docker rm authentik-stack-server-1 authentik-stack-worker-1 authentik-stack-postgresql-1${NC}"
-echo -e "\tOR"
-echo -e "\t${GREEN}docker rm immich-server immich-postgres immich-machine-learning immich-redis${NC}"
-echo ""
-echo -e "${CYAN}Edit the Caddyfile with this command (if selected Caddy Reverse Proxy earlier):\n${NC}"
-echo -e "${GREEN}  For Immich:\n\techo -e "$caddy_immich {\n    import tls_settings\n    reverse_proxy immich-server:2283\n}\n" >> ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile"
-echo -d "${GREEN}  For Authentik:\n\techo -e "$caddy_authentik {\n    import tls_settings\n    reverse_proxy authentik-stack-server-1:9000\n}\n" >> ${SERVER_DATA_FOLDER:-/root/labdata}/caddy/Caddyfile\n${NC}"
-echo -e "${CYAN}Then to compose:\n${NC}"
-echo -e "\t${GREEN}docker compose --env-file $OUTFILES_LOCATION/stack.env -f \"$OUTFILES_LOCATION/$AUTHENTIK_COMPOSE\" up -d $ONE_BY_ONE${NC}"
-echo -e "\tOR"
-echo -e "\t${GREEN}docker compose --env-file $OUTFILES_LOCATION/stack.env -f \"$OUTFILES_LOCATION/$IMMICH_COMPOSE\" up -d $ONE_BY_ONE${NC}"
+if [ -f "$OUTFILES_LOCATION/$AUTHENTIK_COMPOSE" ]; then
+    echo -e "\t${GREEN}docker compose --env-file \"$ENV_FILE\" -f \"$OUTFILES_LOCATION/$AUTHENTIK_COMPOSE\" ps${NC}"
+    echo -e "\t${GREEN}docker compose --env-file \"$ENV_FILE\" -f \"$OUTFILES_LOCATION/$AUTHENTIK_COMPOSE\" logs --tail=100${NC}"
+fi
+if [ -f "$OUTFILES_LOCATION/$IMMICH_COMPOSE" ]; then
+    echo -e "\t${GREEN}docker compose --env-file \"$ENV_FILE\" -f \"$OUTFILES_LOCATION/$IMMICH_COMPOSE\" ps${NC}"
+    echo -e "\t${GREEN}docker compose --env-file \"$ENV_FILE\" -f \"$OUTFILES_LOCATION/$IMMICH_COMPOSE\" logs --tail=100${NC}"
+fi
 echo ""
